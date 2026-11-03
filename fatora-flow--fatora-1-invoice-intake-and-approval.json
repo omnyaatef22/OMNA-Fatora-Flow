@@ -1,0 +1,1261 @@
+{
+  "name": "Fatora 1 · Invoice Intake & Approval",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 5,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment (subject:invoice OR subject:فاتورة)"
+        },
+        "options": {
+          "dataPropertyAttachmentsPrefixName": "attachment_",
+          "downloadAttachments": true
+        }
+      },
+      "id": "n86",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// An email can carry several files. Keep PDFs and images only, one item each, and remember who sent it.\nconst out = [];\nfor (const item of $input.all()) {\n  const from = item.json.from?.value?.[0]?.address || item.json.from?.text || '';\n  for (const [key, bin] of Object.entries(item.binary || {})) {\n    if (!/pdf|image\\/(jpeg|png|webp)/.test(bin.mimeType || '')) continue;\n    out.push({ json: { source: 'email', sender: from, file_name: bin.fileName || key, mime: bin.mimeType }, binary: { data: bin } });\n  }\n}\nif (!out.length) throw new Error('VALIDATION: invoice email from ' + ($input.first().json.from?.text || '?') + ' has no PDF or image attachment');\nreturn out;"
+      },
+      "id": "n87",
+      "name": "One Item per Attachment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "n88",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c89",
+                    "leftValue": "={{ $json.callback_query?.data }}",
+                    "rightValue": "fa:",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Decision"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c90",
+                    "leftValue": "={{ $json.message?.document?.file_id || ($json.message?.photo || []).at(-1)?.file_id || '' }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "File"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n91",
+      "name": "Route Update",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        224,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $json.message.document?.file_id || $json.message.photo.at(-1).file_id }}",
+        "additionalFields": {}
+      },
+      "id": "n92",
+      "name": "Download Telegram File",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        448,
+        464
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const m = $('Route Update').item.json.message;\nconst bin = $input.first().binary.data;\nreturn [{ json: { source: 'telegram', sender: (m.from.username ? '@' + m.from.username : m.from.first_name), chat_id: m.chat.id, file_name: bin.fileName || 'photo.jpg', mime: m.document?.mime_type || bin.mimeType || 'image/jpeg' }, binary: { data: bin } }];"
+      },
+      "id": "n93",
+      "name": "Tag Telegram File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Send the file itself (PDF or photo) to Gemini as base64, with a strict JSON contract.\nconst out = [];\nfor (const [i, item] of $input.all().entries()) {\n  const buf = await this.helpers.getBinaryDataBuffer(i, 'data');\n  if (buf.length > 15 * 1024 * 1024) throw new Error('VALIDATION: file ' + item.json.file_name + ' is larger than 15 MB');\n  out.push({ json: { ...item.json, b64: buf.toString('base64'),\n    prompt: 'You read Egyptian supplier invoices (Arabic or English). Return JSON only with keys: vendor, vendor_tax_id, invoice_number, invoice_date (YYYY-MM-DD), due_date (YYYY-MM-DD or \"\"), currency (EGP|USD|EUR), items: [{description, quantity, unit_price, line_total}], subtotal, vat, total, readable (true|false). Numbers without separators. If a value is not printed on the document use \"\" — never guess.' } });\n}\nreturn out;"
+      },
+      "id": "n94",
+      "name": "Prepare Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: $json.prompt }].concat($json.b64 ? [{ inline_data: { mime_type: $json.mime, data: $json.b64 } }] : []) }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1 } }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "n95",
+      "name": "AI Read Invoice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// The AI reads; code checks. Every rule that fails becomes a readable problem.\nconst src = $('Prepare Extraction').item.json;\nlet d; try { d = JSON.parse(($json.candidates?.[0]?.content?.parts || []).map(p => p.text).join('')); } catch (e) { d = null; }\nconst p = []; const num = v => Number(String(v ?? '').replace(/[^0-9.\\-]/g, ''));\nif (!d || d.readable === false) p.push('document unreadable: send a clearer photo or the original PDF');\nd = d || {};\nconst items = Array.isArray(d.items) ? d.items : [];\nconst sumLines = items.reduce((s, it) => s + num(it.line_total), 0);\nitems.forEach((it, k) => { if (Math.abs(num(it.quantity) * num(it.unit_price) - num(it.line_total)) > 1) p.push('line ' + (k + 1) + ': quantity × price ≠ line total'); });\nconst sub = num(d.subtotal), vat = num(d.vat), total = num(d.total);\nif (!total) p.push('total missing');\nif (items.length && Math.abs(sumLines - sub) > 1) p.push('lines add up to ' + sumLines + ' but subtotal says ' + sub);\nif (sub && Math.abs(sub * 0.14 - vat) > Math.max(1, sub * 0.002)) p.push('VAT ' + vat + ' is not 14% of ' + sub);\nif (sub && Math.abs(sub + vat - total) > 1) p.push('subtotal + VAT ≠ total');\nif (!/^\\d{3}-?\\d{3}-?\\d{3}$/.test(String(d.vendor_tax_id || ''))) p.push('tax registration number missing or not 9 digits');\nif (!d.invoice_number) p.push('invoice number missing');\nconst today = $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd');\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(d.invoice_date || '') || d.invoice_date > today) p.push('invoice date missing or in the future');\nif (d.due_date && d.due_date < today) p.push('due date already passed');\nif (!['EGP', 'USD', 'EUR'].includes(d.currency)) p.push('currency not recognised');\nconst tax = String(d.vendor_tax_id || '').replace(/\\D/g, '').replace(/(\\d{3})(\\d{3})(\\d{3})/, '$1-$2-$3');\nreturn [{ json: { ...src, b64: undefined, vendor: d.vendor || '', vendor_tax_id: tax, invoice_number: String(d.invoice_number || ''), invoice_date: d.invoice_date || '', due_date: d.due_date || '',\n  currency: d.currency || '', subtotal: sub, vat, total, problems: p } }];"
+      },
+      "id": "n96",
+      "name": "Validate Invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 202,
+          "mode": "id",
+          "cachedResultName": "Vendors"
+        },
+        "options": {}
+      },
+      "id": "n97",
+      "name": "Read Vendors",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1568,
+        128
+      ],
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 201,
+          "mode": "id",
+          "cachedResultName": "Invoices"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "invoice_number",
+              "lookupValue": "={{ $('Validate Invoice').item.json.invoice_number || '__none__' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n98",
+      "name": "Find Same Invoice Number",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1792,
+        128
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Business rules on top of the math: known vendor, no duplicates, approval level by amount.\nconst vendors = $('Read Vendors').all().map(i => i.json);\nconst same = $input.all().map(i => i.json).filter(r => r.invoice_id);\nreturn $('Validate Invoice').all().map(({ json: inv }) => {\n  const p = [...inv.problems];\n  const v = vendors.find(x => x.tax_id === inv.vendor_tax_id) || vendors.find(x => x.vendor.toLowerCase() === String(inv.vendor).toLowerCase());\n  if (!v) p.push('vendor not in the approved vendor list');\n  if (same.some(r => r.vendor_tax_id === inv.vendor_tax_id && r.invoice_number === inv.invoice_number)) p.push('DUPLICATE: this invoice number was already received from this vendor');\n  const limit = Number(v?.approval_limit_egp || 0);\n  const id = 'INV-' + $now.setZone('Africa/Cairo').toFormat('yyMMdd') + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();\n  return { json: { ...inv, invoice_id: id, vendor: v?.vendor || inv.vendor, needs_manager: inv.total > limit, approval_limit: limit,\n    status: p.length ? 'needs_review' : 'pending_approval', problems: p } };\n});"
+      },
+      "id": "n99",
+      "name": "Final Checks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 201,
+          "mode": "id",
+          "cachedResultName": "Invoices"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "invoice_id": "={{ $json.invoice_id }}",
+            "received_at": "={{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd HH:mm') }}",
+            "source": "={{ $json.source + ': ' + $json.sender }}",
+            "vendor": "={{ $json.vendor }}",
+            "vendor_tax_id": "={{ $json.vendor_tax_id }}",
+            "invoice_number": "={{ $json.invoice_number }}",
+            "invoice_date": "={{ $json.invoice_date }}",
+            "due_date": "={{ $json.due_date }}",
+            "subtotal": "={{ $json.subtotal }}",
+            "vat": "={{ $json.vat }}",
+            "total": "={{ $json.total }}",
+            "currency": "={{ $json.currency }}",
+            "status": "={{ $json.status }}",
+            "problems": "={{ $json.problems.join('; ') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "invoice_id",
+              "displayName": "invoice_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "received_at",
+              "displayName": "received_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "vendor",
+              "displayName": "vendor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "vendor_tax_id",
+              "displayName": "vendor_tax_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "invoice_date",
+              "displayName": "invoice_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "due_date",
+              "displayName": "due_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "subtotal",
+              "displayName": "subtotal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "vat",
+              "displayName": "vat",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "total",
+              "displayName": "total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "problems",
+              "displayName": "problems",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "cellFormat": "RAW",
+          "useAppend": true
+        }
+      },
+      "id": "n100",
+      "name": "Save Invoice",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2224,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c101",
+              "leftValue": "={{ $('Final Checks').item.json.status }}",
+              "rightValue": "pending_approval",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n102",
+      "name": "Ready for Approval?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2448,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "={{ '🧾 ' + $('Final Checks').item.json.invoice_id + ' · ' + $('Final Checks').item.json.vendor + '\\nInvoice ' + $('Final Checks').item.json.invoice_number + ' · ' + $('Final Checks').item.json.invoice_date + '\\nTotal ' + Number($('Final Checks').item.json.total).toLocaleString('en-US') + ' ' + $('Final Checks').item.json.currency + ' (VAT ' + $('Final Checks').item.json.vat + ')\\nDue ' + ($('Final Checks').item.json.due_date || '-') + ($('Final Checks').item.json.needs_manager ? '\\n⚠️ Above vendor limit ' + $('Final Checks').item.json.approval_limit + ': manager approval required' : '') }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ Approve",
+                    "additionalFields": {
+                      "callback_data": "={{ 'fa:approve:' + $('Final Checks').item.json.invoice_id }}"
+                    }
+                  },
+                  {
+                    "text": "❌ Reject",
+                    "additionalFields": {
+                      "callback_data": "={{ 'fa:reject:' + $('Final Checks').item.json.invoice_id }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "n103",
+      "name": "Ask for Approval",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2672,
+        128
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 201,
+          "mode": "id",
+          "cachedResultName": "Invoices"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "invoice_id": "={{ $('Final Checks').item.json.invoice_id }}",
+            "approval_message_id": "={{ $json.result.message_id }}"
+          },
+          "matchingColumns": [
+            "invoice_id"
+          ],
+          "schema": [
+            {
+              "id": "invoice_id",
+              "displayName": "invoice_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "approval_message_id",
+              "displayName": "approval_message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "n104",
+      "name": "Save Approval Message",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2880,
+        128
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 203,
+          "mode": "id",
+          "cachedResultName": "Review"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "time": "={{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd HH:mm') }}",
+            "source": "={{ $('Final Checks').item.json.source + ': ' + $('Final Checks').item.json.sender }}",
+            "raw": "={{ $('Final Checks').item.json.file_name + ' · ' + $('Final Checks').item.json.invoice_id }}",
+            "problems": "={{ $('Final Checks').item.json.problems.join('; ') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "time",
+              "displayName": "time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "raw",
+              "displayName": "raw",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "problems",
+              "displayName": "problems",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "cellFormat": "RAW",
+          "useAppend": true
+        }
+      },
+      "id": "n105",
+      "name": "Send to Review Queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2672,
+        304
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_CHAT_ID",
+        "text": "={{ '🔎 ' + $('Final Checks').item.json.invoice_id + ' from ' + $('Final Checks').item.json.sender + ' needs review:\\n• ' + $('Final Checks').item.json.problems.join('\\n• ') }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "n106",
+      "name": "Tell Finance: Review Needed",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2880,
+        304
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Button data looks like fa:approve:INV-261030-AB12. Only listed people may decide.\nconst APPROVERS = ['PUT_APPROVER_USERNAME', 'PUT_MANAGER_USERNAME'];\nconst MANAGERS = ['PUT_MANAGER_USERNAME'];\nconst q = $json.callback_query; const [, action, invoice_id] = q.data.split(':');\nconst user = q.from.username || String(q.from.id);\nreturn [{ json: { action, invoice_id, user, allowed: APPROVERS.includes(user), is_manager: MANAGERS.includes(user), query_id: q.id, chat_id: q.message.chat.id, message_id: q.message.message_id, original: q.message.text } }];"
+      },
+      "id": "n107",
+      "name": "Parse Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 201,
+          "mode": "id",
+          "cachedResultName": "Invoices"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "invoice_id",
+              "lookupValue": "={{ $json.invoice_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n108",
+      "name": "Find Invoice",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        672,
+        704
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $('Parse Decision').first().json; const inv = $('Find Invoice').first().json; const limit = Number($input.first().json.approval_limit_egp || 0);\nlet ok = true, toast;\nif (!d.allowed) { ok = false; toast = 'You are not an approver.'; }\nelse if (!inv.invoice_id) { ok = false; toast = 'Invoice not found.'; }\nelse if (inv.status !== 'pending_approval') { ok = false; toast = 'Already ' + inv.status + ' by ' + (inv.approved_by || '?'); }\nelse if (d.action === 'approve' && Number(inv.total) > limit && !d.is_manager) {\n  ok = false; toast = 'Above the limit: a manager must approve.'; }\nreturn [{ json: { ...d, ok, toast: ok ? (d.action === 'approve' ? 'Approved ✅' : 'Rejected ❌') : toast, status: d.action === 'approve' ? 'approved' : 'rejected' } }];"
+      },
+      "id": "n109",
+      "name": "Apply Approval Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "queryId": "={{ $json.query_id }}",
+        "additionalFields": {
+          "show_alert": "={{ !$json.ok }}",
+          "text": "={{ $json.toast }}"
+        }
+      },
+      "id": "n110",
+      "name": "Answer Button",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1216,
+        704
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c111",
+              "leftValue": "={{ $('Apply Approval Rules').item.json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "n112",
+      "name": "Decision Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1440,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 201,
+          "mode": "id",
+          "cachedResultName": "Invoices"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "invoice_id": "={{ $('Apply Approval Rules').item.json.invoice_id }}",
+            "status": "={{ $('Apply Approval Rules').item.json.status }}",
+            "approved_by": "={{ $('Apply Approval Rules').item.json.user }}",
+            "decided_at": "={{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd HH:mm') }}"
+          },
+          "matchingColumns": [
+            "invoice_id"
+          ],
+          "schema": [
+            {
+              "id": "invoice_id",
+              "displayName": "invoice_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "approved_by",
+              "displayName": "approved_by",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "decided_at",
+              "displayName": "decided_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "id": "n113",
+      "name": "Record Decision",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1680,
+        624
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "operation": "editMessageText",
+        "chatId": "={{ $('Apply Approval Rules').item.json.chat_id }}",
+        "messageId": "={{ $('Apply Approval Rules').item.json.message_id }}",
+        "text": "={{ $('Apply Approval Rules').item.json.original + '\\n\\n' + ($('Apply Approval Rules').item.json.status === 'approved' ? '✅ Approved' : '❌ Rejected') + ' by @' + $('Apply Approval Rules').item.json.user }}",
+        "additionalFields": {}
+      },
+      "id": "n114",
+      "name": "Update Approval Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1888,
+        624
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 202,
+          "mode": "id",
+          "cachedResultName": "Vendors"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "tax_id",
+              "lookupValue": "={{ $('Find Invoice').item.json.vendor_tax_id || '__none__' }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fvl1",
+      "name": "Find Vendor Limit",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        848,
+        704
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "One Item per Attachment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One Item per Attachment": {
+      "main": [
+        [
+          {
+            "node": "Prepare Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Route Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Update": {
+      "main": [
+        [
+          {
+            "node": "Parse Decision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Download Telegram File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Telegram File": {
+      "main": [
+        [
+          {
+            "node": "Tag Telegram File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag Telegram File": {
+      "main": [
+        [
+          {
+            "node": "Prepare Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Extraction": {
+      "main": [
+        [
+          {
+            "node": "AI Read Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Read Invoice": {
+      "main": [
+        [
+          {
+            "node": "Validate Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Invoice": {
+      "main": [
+        [
+          {
+            "node": "Read Vendors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Vendors": {
+      "main": [
+        [
+          {
+            "node": "Find Same Invoice Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Same Invoice Number": {
+      "main": [
+        [
+          {
+            "node": "Final Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Checks": {
+      "main": [
+        [
+          {
+            "node": "Save Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Invoice": {
+      "main": [
+        [
+          {
+            "node": "Ready for Approval?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ready for Approval?": {
+      "main": [
+        [
+          {
+            "node": "Ask for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send to Review Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask for Approval": {
+      "main": [
+        [
+          {
+            "node": "Save Approval Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Review Queue": {
+      "main": [
+        [
+          {
+            "node": "Tell Finance: Review Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Decision": {
+      "main": [
+        [
+          {
+            "node": "Find Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Invoice": {
+      "main": [
+        [
+          {
+            "node": "Find Vendor Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Approval Rules": {
+      "main": [
+        [
+          {
+            "node": "Answer Button",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Button": {
+      "main": [
+        [
+          {
+            "node": "Decision Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision Valid?": {
+      "main": [
+        [
+          {
+            "node": "Record Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Decision": {
+      "main": [
+        [
+          {
+            "node": "Update Approval Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Vendor Limit": {
+      "main": [
+        [
+          {
+            "node": "Apply Approval Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Cairo"
+  }
+}
